@@ -1,42 +1,74 @@
-# This workflow will install Python dependencies, run tests and lint with a single version of Python
-# For more information see: https://help.github.com/actions/language-and-framework-guides/using-python-with-github-actions
-
 name: Python pip build
 
 on:
   push:
-    branches: [ "main" ]
   pull_request:
-    branches: [ "main" ]
+  workflow_dispatch:
 
 permissions:
   contents: read
 
 jobs:
   build:
-
     runs-on: ubuntu-latest
+    timeout-minutes: 20
 
     steps:
-    - uses: actions/checkout@v3
-    - name: Set up Python 3.11
-      uses: actions/setup-python@v3
-      with:
-        python-version: "3.11"
-    - name: Install dependencies
-      run: |
-        python -m pip install --upgrade pip
-        pip install flake8 wheel
-        if [ -f requirements.txt ]; then pip install -r requirements.txt; fi
-    - name: Lint with flake8
-      run: |
-        # stop the build if there are Python syntax errors or undefined names
-        flake8 . --count --select=E9,F63,F7,F82 --show-source --statistics
-        # exit-zero treats all errors as warnings. The GitHub editor is 127 chars wide
-        flake8 . --count --exit-zero --max-complexity=25 --max-line-length=512 --statistics
-    - name: Pip build
-      run: |
-        python3 setup.py sdist bdist_wheel
-    - name: Pip install
-      run: |
-        python3 setup.py install
+      - name: Check out repository
+        uses: actions/checkout@v7
+        with:
+          persist-credentials: false
+
+      # Match the Python version used by the previous build workflow.
+      - name: Set up Python
+        uses: actions/setup-python@v7
+        with:
+          python-version: "3.11"
+          cache: pip
+          cache-dependency-path: |
+            requirements.txt
+            pyproject.toml
+
+      - name: Install build tools and declared dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install build twine -r requirements.txt
+
+      # The default build also builds the wheel from the source archive.
+      - name: Build source distribution and wheel
+        run: python -m build
+
+      - name: Check distribution metadata
+        run: python -m twine check dist/*
+
+      - name: Install wheel and check dependencies
+        run: |
+          python -m pip install dist/*.whl
+          python -m pip check
+
+      # Run outside the checkout so imports must come from the installed wheel.
+      - name: Smoke-test installed package and bundled data
+        working-directory: ${{ runner.temp }}
+        run: |
+          apachetomcatscanner --help
+          python -m apachetomcatscanner --help
+          python - <<'PY'
+          from apachetomcatscanner.Config import Config
+          from apachetomcatscanner.VulnerabilitiesDB import VulnerabilitiesDB
+
+          config = Config()
+          assert config.credentials, "Default credentials are missing from the wheel"
+          database = VulnerabilitiesDB(config=config, skip_auto_update=True)
+          assert database.cves, "CVE data is missing from the wheel"
+          assert database.versions_to_cves, "CVE version lookup is empty"
+          print(f"Loaded {len(database.cves)} bundled CVEs")
+          PY
+
+      - name: Upload build artifacts
+        uses: actions/upload-artifact@v7
+        with:
+          name: python-distributions
+          path: |
+            dist/*.whl
+            dist/*.tar.gz
+          if-no-files-found: error
